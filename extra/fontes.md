@@ -1,4 +1,4 @@
-https://man7.org/linux/man-pages/man2/syscalls.2.html
+man page syscalls
 
 https://stackoverflow.com/questions/31149539/finding-the-username-in-a-linux-system-call
 
