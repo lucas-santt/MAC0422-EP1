@@ -1,5 +1,3 @@
-//#define _POSIX_C_SOURCE 199309L
-
 // Padrão do C
 #include <stdlib.h>
 #include <stdio.h>
