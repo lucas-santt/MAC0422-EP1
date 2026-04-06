@@ -26,7 +26,7 @@ typedef struct process {
 
     long int remaining_dt;
     int priority;
-    long int start_time;
+
     long int finished_time;
 } process;
 
@@ -35,6 +35,8 @@ typedef struct Thread {
     pthread_t t;
     process* ps;
     int active;
+    long int start_time;
+    long int quantum;
 } Thread;
 
 // Variáveis globais
@@ -44,6 +46,7 @@ long int start_time = 0;
 process ps_table[MAX_PROCESS_NUMBER];
 int ps_count = 0;
 int ps_completed = 0;
+int preemptions = 0;
 
 process* queue[MAX_PROCESS_NUMBER];
 int q_count = 0;
@@ -56,9 +59,9 @@ long int nanoToSec(long int nano) {
     return (nano / 1000000000L);
 }
 
-long int nanoToSecRound(long int nano) {
-    /* Utilizada para ter mais precisão na hora de imprimir tempo */
-    return (long int)round((double)nano / 1000000000.0);
+float nanoToSecFormatted(long int nano) {
+    /* Formatted for visualization, mas pode perder precisão */
+    return (float)nano / 1000000000.0;
 }
 
 long int getCurrTime() {
@@ -75,7 +78,6 @@ long int getCurrTime() {
 // Gerenciamento da Fila
 
 void enqueue(process* ps) {
-    /* Adiciona um processo na fila */
     if(q_count >= MAX_PROCESS_NUMBER)
         return;
 
@@ -95,8 +97,8 @@ void dequeue(int idx) {
 }
 
 void manageQueue(long int now) {
-    now = nanoToSec(now);
     /* Gerencia a fila adicionando os processos de acordo com a sua chegada */
+    now = nanoToSec(now);
     for(int i = 0; i < ps_count; i++){
         if(now < ps_table[i].t0 || ps_table[i].t0 == -1)
             continue;
@@ -109,7 +111,7 @@ void manageQueue(long int now) {
 
 // Process / Thread Management
 
-int calcPriority(long int deadline, long int now) {
+int calcPriority(process* ps, long int now) {
     /* Calcula a prioridade de um processo com base em sua
             deadline e o instante atual de tempo.
 
@@ -123,13 +125,13 @@ int calcPriority(long int deadline, long int now) {
             deadline: Deadline do processo em segundos
             now: Instante atual de tempo em segundos
     */
-   long int time_to_deadline = deadline - nanoToSec(now);
+   long int time_to_deadline = ps->deadline - nanoToSec(now);
 
-   if(time_to_deadline <= 0 || time_to_deadline >= 40) return 40;
+   if(time_to_deadline <= 0 || time_to_deadline > ps->remaining_dt || time_to_deadline >= 40) return 40;
    return time_to_deadline;
 }
 
-long int priorityQuantumSum(int priority) {
+long int priorityQuantum(int priority) {
     /* 
         Calcula o valor a ser adicionado no quantum 
             com base em sua prioridade, em nanosegundos.
@@ -140,40 +142,28 @@ long int priorityQuantumSum(int priority) {
     */
    float percent = (40.0 - (float)priority) / 39.0;
 
-   if(RR_QUANTUM_SEC <= 2) {
-        // Quando o quantum é muito baixo, aumentamos mais o bonus
-        percent = percent * 1.5;
-   }
+   // Como não podemos fazer secToNano(percent * RR_QUANTUM_SEC), temos que multiplicar manualmente
+   long int bonus_nanosec = (long int)(percent * RR_QUANTUM_SEC * 1000000000L);
 
-   long int bonus_sec = (long int)round(percent * RR_QUANTUM_SEC);
-
-   return secToNano(bonus_sec);
+   return secToNano(RR_QUANTUM_SEC) + bonus_nanosec;
 } 
 
-void onThreadFinished(Thread* curr_t, long int now) {
+void onThreadFinished(Thread* curr_t) {
     process* curr_ps = curr_t->ps;
-    now = nanoToSecRound(now);
     
     curr_t->active = 0;
     if(curr_ps->remaining_dt > 0) {
         // Processo foi preemptado
-        printf("%s preempted at time %ld\n",
-            curr_ps->name, nanoToSecRound(curr_ps->finished_time));
+        printf("%s preempted at time %f\n",
+            curr_ps->name, nanoToSecFormatted(curr_ps->finished_time));
         enqueue(curr_ps);
     } else {
         // Processo foi finalizado
-        printf("%s finished at time %ld\n", 
-            curr_ps->name, nanoToSecRound(curr_ps->finished_time));
+        printf("%s finished at time %f\n", 
+            curr_ps->name, nanoToSecFormatted(curr_ps->finished_time));
         ps_completed++;
-        curr_t->ps = NULL;
     }
-}
-
-void onThreadPreempted(void* arg) {
-    process* ps = (process*)arg;
-    long int now = getCurrTime();
-
-    ps->finished_time = now;
+    curr_t->ps = NULL;
 }
 
 void* worker(void* arg) {
@@ -185,20 +175,14 @@ void* worker(void* arg) {
     */
     process* ps = (process*)arg;
     long int now = getCurrTime();
-    long int finish_time = now + secToNano(ps->remaining_dt);
-    ps->start_time = now;
-    pthread_cleanup_push(onThreadPreempted, ps);
+    long int finish_time = now + ps->remaining_dt;
 
     // Simulação da execução do processo
     while(now < finish_time) {
         now = getCurrTime();
-        ps->remaining_dt = nanoToSecRound(finish_time - now);
+        ps->finished_time = now;
         pthread_testcancel(); // Único cancelation point da execução do ps
     }
-
-    // Já acabamos! Para evitar ações duplicados, n precisa mais realizar preempção
-    pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
-    pthread_cleanup_pop(0);
     
     ps->remaining_dt = 0;
     ps->finished_time = now;    
@@ -207,9 +191,9 @@ void* worker(void* arg) {
 
 // Escalonadores
 
-int getShortestProcess(process* out_process){
+int getShortestProcess(process** out_process){
     /* Retorna o processo de menor duração e o retira da fila */
-    if(q_count == 0) return -1;
+    if(q_count == 0) return 0;
     
     int shortest_ps_idx = -1;  
     for(int i = 0; i < q_count; i++) {
@@ -217,10 +201,10 @@ int getShortestProcess(process* out_process){
             shortest_ps_idx = i;
     }
 
-    if(shortest_ps_idx == -1) return -1;
-    out_process = queue[shortest_ps_idx];
+    if(shortest_ps_idx == -1) return 0;
+    *out_process = queue[shortest_ps_idx];
     dequeue(shortest_ps_idx);
-    return shortest_ps_idx;
+    return 1;
 }
 
 int getNextProcess(process** out_process) {
@@ -256,129 +240,57 @@ int getNextPriorityProcess(process** out_process, int currPriority) {
     return 1;
 }
 
-void sjf() {
-    int num_cpus = sysconf(_SC_NPROCESSORS_ONLN) - 1; // Um thread para o gerenciado da fila;
-    if(num_cpus <= 0) num_cpus = 1;
+void singleSjfThread(Thread* curr_t, long int now) {
+    if(curr_t->active) {
+        // Verifica se a thread já terminou
+        if(pthread_tryjoin_np(curr_t->t, NULL) != 0) 
+            return;
 
-    int num_threads = ps_count < num_cpus ? ps_count : num_cpus;
+        printf("%s finished at time %f\n", 
+            curr_t->ps->name, nanoToSecFormatted(curr_t->ps->finished_time));
 
-    pthread_t threads[num_threads];
-    int active[num_threads];
+        curr_t->active = 0;
+        ps_completed++;
+    }
+    // Thread inativa, tenta pegar um processo para rodar
+    process* next_ps;
     cpu_set_t cpuset;
 
-    for(int i=0; i<num_threads; i++) 
-        active[i] = 0; // Inativo
-        
-    int completed = 0;
-    while(completed < ps_count) {
-        for(int i=0; i<num_threads; i++) {
-            if(active[i]) {
-                // Verifica se a thread já terminou
-                if(pthread_tryjoin_np(threads[i], NULL) == 0) {
-                    active[i] = 0;
-                    completed++;
-                } else {
-                    continue;
-                }
-            }
-            // Thread inativa, tenta pegar um processo para rodar
-            process* next_ps = malloc(sizeof(process));
-            
-            int has_process = getShortestProcess(next_ps);
-
-            if(!has_process) {
-                free(next_ps);
-                usleep(1000); // Para não gastar recurso em um loop rápido
-                continue;
-            }
-
-            pthread_create(&threads[i], NULL, worker, next_ps);
-            CPU_ZERO(&cpuset);
-            CPU_SET(i, &cpuset);
-
-            pthread_setaffinity_np(threads[i], sizeof(cpu_set_t), &cpuset);
-
-            active[i] = 1;
-            free(next_ps);
-        }   
+    
+    int has_process = getShortestProcess(&next_ps);
+    if(!has_process) {
+        usleep(1000); // Para não gastar recurso em um loop rápido
+        return;
     }
+
+    printf("%s started at time %f\n", next_ps->name, nanoToSecFormatted(now));
+
+    curr_t->ps = next_ps;
+    pthread_create(&curr_t->t, NULL, worker, next_ps);
+    CPU_ZERO(&cpuset);
+    CPU_SET(curr_t->idx, &cpuset);
+    pthread_setaffinity_np(curr_t->t, sizeof(cpu_set_t), &cpuset);
+    curr_t->active = 1;
 }
 
-void roundRobin() {
-    /*
-        Escalonador Round Robin, onde cada processo possui um quantum 
-            de tempo para execução. Sempre seguindo first in first out.
-
-        Cada thread i possui três propriedades:
-            active[i]: 0 - Inativo, 1 - Ativo, 2 - Em preempção
-                Foi necessário adicionar o estado 2 para evitar ações 
-                duplicadas do próprio esalonador
-            last_start_time[i]: Tempo de início da execução do processo
-            running_processes[i]: Processo que está sendo executado
-    */
+void sjf() {
     int num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
     int num_threads = ps_count < num_cpus ? ps_count : num_cpus;
-    cpu_set_t cpuset;
 
-    pthread_t threads[num_threads];
-    int active[num_threads];
-    long int last_start_time[num_threads];
-    process* running_processes[num_threads];
+    Thread* t_buffer[num_threads];
 
     for(int i=0; i<num_threads; i++) {
-        active[i] = 0; // Inativo
-        last_start_time[i] = 0;
-        running_processes[i] = NULL;
+        t_buffer[i] = malloc(sizeof(Thread));
+        t_buffer[i]->idx = i;
+        t_buffer[i]->ps = NULL;
+        t_buffer[i]->active = 0;
     }
         
     while(ps_completed < ps_count) {
-        long int now = getCurrTime(false);
-        manageQueue(now);
+        long int now = getCurrTime();
 
         for(int i=0; i<num_threads; i++) {
-            if(active[i]) {
-                // Verifica se a thread já terminou
-                if(pthread_tryjoin_np(threads[i], NULL) == 0) {
-                    active[i] = 0;
-                    if(running_processes[i]->remaining_dt > 0) {
-                        // Processo foi preemptado
-                        printf("%s preempted at time %ld\n", 
-                            running_processes[i]->name, now);
-                        enqueue(running_processes[i]);
-                    } else {
-                        // Processo foi finalizado
-                        printf("%s finished at time %ld\n", 
-                            running_processes[i]->name, now);
-                        ps_completed++;
-                    }
-                } else {
-                    // Verifica se o quantum já passou
-                    if(active[i] == 1 && now - last_start_time[i] >= RR_QUANTUM_SEC) {
-                        pthread_cancel(threads[i]);
-                        active[i] = 2;
-                    }
-                    continue;
-                }
-            }
-            // Thread inativa, tenta pegar um processo para rodar
-            process* next_ps;
-            int has_process = getNextProcess(&next_ps);
-            if(!has_process) {
-                usleep(1000); // Para não gastar recurso em um loop rápido
-                continue;
-            }
-
-            printf("%s started at time %ld\n", 
-                next_ps->name, now);
-
-            active[i] = 1;
-            running_processes[i] = next_ps;
-            last_start_time[i] = now;
-            pthread_create(&threads[i], NULL, worker, next_ps);
-            CPU_ZERO(&cpuset);
-            CPU_SET(i, &cpuset);
-            pthread_setaffinity_np(threads[i], sizeof(cpu_set_t), &cpuset);
-
+            singleSjfThread(t_buffer[i], now);
         }   
     }
 }
@@ -392,19 +304,24 @@ void singlePriorityThread(Thread* curr_t, bool isRR, long int now) {
             start_time: Tempo de início da execução do último processo
     */
     process* curr_ps = curr_t->ps;
-    cpu_set_t cpuset;
 
     if(curr_t->active) {
+        void* status;
         // Verifica se a thread já terminou
-        if(pthread_tryjoin_np(curr_t->t, NULL) == 0) {
-            onThreadFinished(curr_t, now);
+        if(pthread_tryjoin_np(curr_t->t, &status) == 0) {
+            if(status == PTHREAD_CANCELED) 
+                curr_ps->remaining_dt -= curr_t->quantum;
+            else
+                curr_ps->remaining_dt = 0;
+            
+            onThreadFinished(curr_t);
         } else {
             // Verifica se o quantum já passou
-            long int quantum = secToNano(RR_QUANTUM_SEC) + priorityQuantumSum(curr_ps->priority);
-            long int elapsed_time = now - curr_ps->start_time;
-            if(curr_t->active == 1 && elapsed_time >= quantum) {
+            long int elapsed_time = now - curr_t->start_time;
+            if(curr_t->active == 1 && elapsed_time >= curr_t->quantum) {
                 pthread_cancel(curr_t->t);
                 curr_t->active = 2;
+                preemptions++;
             }
         }
         return;
@@ -412,6 +329,7 @@ void singlePriorityThread(Thread* curr_t, bool isRR, long int now) {
 
     // Thread inativa, tenta pegar um processo para rodar
     process* next_ps;
+    cpu_set_t cpuset;
     int has_process;
 
     if(isRR) 
@@ -428,12 +346,18 @@ void singlePriorityThread(Thread* curr_t, bool isRR, long int now) {
         return;
     }
 
-    printf("%s started at time %ld (priority: %d)\n", 
-        next_ps->name, nanoToSec(now), next_ps->priority);
+    long int quantum = priorityQuantum(next_ps->priority);
+
+    if(isRR)
+        printf("%s started at time %f\n", next_ps->name, nanoToSecFormatted(now));
+    else
+        printf("%s started at time %f (priority: %d - quantum: %f)\n", 
+            next_ps->name, nanoToSecFormatted(now), next_ps->priority, nanoToSecFormatted(quantum));
 
     curr_t->active = 1;
     curr_t->ps = next_ps;
-    next_ps->start_time = now;
+    curr_t->start_time = now;
+    curr_t->quantum = quantum;
 
     pthread_create(&curr_t->t, NULL, worker, next_ps);
     CPU_ZERO(&cpuset);
@@ -467,7 +391,7 @@ void escPrioridade(bool isRR) {
 
         if(!isRR) {
             for(int i=0; i<q_count; i++) {
-                queue[i]->priority = calcPriority(queue[i]->deadline, now);
+                queue[i]->priority = calcPriority(queue[i], now);
             }
         }
 
@@ -489,8 +413,8 @@ process extractProcess(char* process_line) {
     ps.deadline = atoi(strtok(NULL, " "));
     ps.t0 = atoi(strtok(NULL, " "));
     ps.dt = atoi(strtok(NULL, " "));
-    ps.remaining_dt = ps.dt;
-    ps.priority = 1;
+    ps.remaining_dt = secToNano(ps.dt);
+    ps.priority = 40;
 
     return ps;
 }
@@ -510,11 +434,29 @@ void readTrace(char* trace_path) {
     fclose(trace_ptr);
 }
 
+void writeOutput(char* output_path) {
+    FILE* output_ptr = fopen(output_path, "w");
+    
+    for(int i = 0; i < ps_count; i++) {
+        process ps = ps_table[i];
+
+        int completed = 0;
+        if(ps.finished_time <= ps.deadline) completed = 1;
+
+        float tf = nanoToSecFormatted(ps.finished_time);
+        int tr = ps.finished_time - secToNano(ps.t0);
+
+        fprintf(output_ptr, "%d %s %f %f", completed, ps.name, tf, nanoToSecFormatted(tr));
+    }
+    fprintf(output_ptr, "%d\n", preemptions);
+    fclose(output_ptr);
+}
+
 int main(int arg_count, char* args[]) {    
     start_time = getCurrTime();
     readTrace(args[1]);
     
-    escPrioridade(false);
+    sjf();
 
     return 0;
 }
