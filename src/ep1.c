@@ -1,43 +1,4 @@
-#define _GNU_SOURCE // Para alocamento da cpu
-
-// Padrão do C
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
-
-// Pthreads
-#include <pthread.h>
-#include <sched.h>
-
-// Suporte
-#include <string.h>
-#include <unistd.h>
-#include <math.h>
-
-#define BUFFER_MAX_SIZE 1024
-#define MAX_PROCESS_NUMBER 150
-#define RR_QUANTUM_SEC 1
-
-typedef struct process {
-    char name[255];
-    long int deadline;
-    long int t0;
-    long int dt;
-
-    long int remaining_dt;
-    int priority;
-
-    long int finished_time;
-} process;
-
-typedef struct Thread {
-    int idx;
-    pthread_t t;
-    process* ps;
-    int active;
-    long int start_time;
-    long int quantum;
-} Thread;
+# include "ep1.h"
 
 // Variáveis globais
 
@@ -100,11 +61,12 @@ void manageQueue(long int now) {
     /* Gerencia a fila adicionando os processos de acordo com a sua chegada */
     now = nanoToSec(now);
     for(int i = 0; i < ps_count; i++){
-        if(now < ps_table[i].t0 || ps_table[i].t0 == -1)
+        if(now < ps_table[i].t0 || ps_table[i].arrived == 1)
             continue;
 
         printf("%s arrived at queue! (t0=%ld)\n", ps_table[i].name, ps_table[i].t0);
-        ps_table[i].t0 = -1;
+        ps_table[i].arrived = 1;
+        ps_table[i].t0 = getCurrTime();
         enqueue(&ps_table[i]);
     }
 }
@@ -142,10 +104,10 @@ long int priorityQuantum(int priority) {
     */
    float percent = (40.0 - (float)priority) / 39.0;
 
-   // Como não podemos fazer secToNano(percent * RR_QUANTUM_SEC), temos que multiplicar manualmente
-   long int bonus_nanosec = (long int)(percent * RR_QUANTUM_SEC * 1000000000L);
+   // Como não podemos fazer secToNano(percent * QUANTUM_SEC), temos que multiplicar manualmente
+   long int bonus_nanosec = (long int)(percent * QUANTUM_SEC * 1000000000L);
 
-   return secToNano(RR_QUANTUM_SEC) + bonus_nanosec;
+   return secToNano(QUANTUM_SEC) + bonus_nanosec;
 } 
 
 void onThreadFinished(Thread* curr_t) {
@@ -251,6 +213,8 @@ void singleSjfThread(Thread* curr_t, long int now) {
 
         curr_t->active = 0;
         ps_completed++;
+
+        return;
     }
     // Thread inativa, tenta pegar um processo para rodar
     process* next_ps;
@@ -259,7 +223,7 @@ void singleSjfThread(Thread* curr_t, long int now) {
     
     int has_process = getShortestProcess(&next_ps);
     if(!has_process) {
-        usleep(1000); // Para não gastar recurso em um loop rápido
+        //usleep(1000); // Para não gastar recurso em um loop rápido
         return;
     }
 
@@ -287,9 +251,10 @@ void sjf() {
     }
         
     while(ps_completed < ps_count) {
-        long int now = getCurrTime();
-
+        
         for(int i=0; i<num_threads; i++) {
+            long int now = getCurrTime();
+            manageQueue(now);
             singleSjfThread(t_buffer[i], now);
         }   
     }
@@ -411,6 +376,7 @@ process extractProcess(char* process_line) {
 
     strcpy(ps.name, strtok(process_line, " "));
     ps.deadline = atoi(strtok(NULL, " "));
+    ps.arrived = 0;
     ps.t0 = atoi(strtok(NULL, " "));
     ps.dt = atoi(strtok(NULL, " "));
     ps.remaining_dt = secToNano(ps.dt);
@@ -423,7 +389,12 @@ void readTrace(char* trace_path) {
     FILE* trace_ptr;
     char buffer[BUFFER_MAX_SIZE];
 
-    trace_ptr = fopen(trace_path, "r"); // TODO: Tratar erro se o arquivo não existe
+    trace_ptr = fopen(trace_path, "r"); 
+
+    if(trace_ptr == NULL) {
+        printf("Error opening trace file!\n");
+        exit(1);
+    }
 
     int i = 0;
     while(fgets(buffer, BUFFER_MAX_SIZE, trace_ptr) && i < MAX_PROCESS_NUMBER) {
@@ -437,16 +408,21 @@ void readTrace(char* trace_path) {
 void writeOutput(char* output_path) {
     FILE* output_ptr = fopen(output_path, "w");
     
+    if(output_ptr == NULL) {
+        printf("Error opening output file!\n");
+        return;
+    }
+
     for(int i = 0; i < ps_count; i++) {
         process ps = ps_table[i];
 
         int completed = 0;
-        if(ps.finished_time <= ps.deadline) completed = 1;
+        if(ps.finished_time <= secToNano(ps.deadline)) completed = 1;
 
         float tf = nanoToSecFormatted(ps.finished_time);
-        int tr = ps.finished_time - secToNano(ps.t0);
+        long int tr = ps.finished_time - ps.t0;
 
-        fprintf(output_ptr, "%d %s %f %f", completed, ps.name, tf, nanoToSecFormatted(tr));
+        fprintf(output_ptr, "%d %s %f %f\n", completed, ps.name, tf, nanoToSecFormatted(tr));
     }
     fprintf(output_ptr, "%d\n", preemptions);
     fclose(output_ptr);
@@ -454,9 +430,19 @@ void writeOutput(char* output_path) {
 
 int main(int arg_count, char* args[]) {    
     start_time = getCurrTime();
-    readTrace(args[1]);
-    
-    sjf();
+    readTrace(args[2]);
+
+    int esc = atoi(args[1]);
+
+    if(esc == 1)
+        sjf();
+    else if(esc == 2)
+        escPrioridade(true);
+    else
+        escPrioridade(false);
+
+    if(args[3] != NULL)
+        writeOutput(args[3]);
 
     return 0;
 }

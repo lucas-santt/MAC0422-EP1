@@ -1,0 +1,27 @@
+Método 1: Utilizando makefile
+
+Dentro do diretório que contem os arquivos ep1.c, ep1.h, imesh.c, imesh.h e makefile, basta utilizar o seguinte comando:
+
+make
+
+para gerar dois executáveis: ep1 e imesh.
+Caso queira gerar apenas um dos dois, basta digitar o nome do executável escolhido:
+
+make ep1
+ou
+make imesh
+
+Desse modo, o arquivo makefile irá criar apenas o executável pedido
+
+Método 2: Utilizando gcc
+
+Este é o metódo que o makefile, implicitamente, utiliza. Em gcc, temos que o comando: gcc arquivo.c -o executavel
+Porém, como suporte, utilizamos as flags:
+-Wall: Ver possíveis erros de compilação, caso existam
+-lreadline: Compilar com a biblioteca readline
+-lm: Compilar com  a biblioteca math
+
+Desse modo, podemos compilar um dos executáveis com os seguintes comando:
+
+gcc -Wall ep1.c -o ep1 -lreadline -lm
+gcc -Wall imesh.c -o imesh -lreadline -lm

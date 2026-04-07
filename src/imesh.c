@@ -1,26 +1,4 @@
-// Padrão do C
-#include <stdlib.h>
-#include <stdio.h>
-
-// Chamadas de sistema (presentes na manpage syscalls)
-#include <unistd.h>
-#include <signal.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <time.h>
-#include <sys/wait.h>
-
-// Leitura de input
-#include <readline/readline.h>
-#include <readline/history.h>
-
-// Suportes
-#include <string.h>
-
-#define USER_MAX_SIZE 256
-#define PATH_MAX_SIZE 4096
-#define FILE_BUFFER_MAX_SIZE 4096
-#define MAX_ARGS_SIZE 6
+#include "imesh.h"
 
 // Comandos (chamadas de sistema)
 
@@ -100,50 +78,13 @@ int startswith(char* str, char* pre) {
 void getUsername(char* username_out) {
     /*
         Escreve o nome de usuário na variável username_out, não
-            escreve nada caso contrário. Faz isso lendo o
-            arquivo /etc/passwd
-
-        strtok estava quebrando quando utilizava diferentes tipos
-            de caracter de quebra, por isso tive que utilizar strchr
-            para a string da linha, o que me obrigou a manter dois
-            ponteiros para acompanhar o início e o fim de cada
-            linha (que nem uma lista circular)
+            escreve nada caso contrário.
     */
-    strcpy(username_out, "unknown"); // Para possíveis erros
-
-    int uid = getuid(); // syscall getuid(2)
-
-    int fd = open("/etc/passwd", O_RDONLY); // syscall open(2)
-    if (fd < 0) return;
-
-    char buffer[FILE_BUFFER_MAX_SIZE];
-    int bytes = read(fd, buffer, sizeof(buffer) - 1); // syscall read(2)
-    close(fd); // syscall close(2)
-
-    if (bytes <= 0) return;
-    buffer[bytes] = '\0'; // Para ser tratado como uma string
-
-    char* line_init = buffer; // Mesma coisa que &buffer[0]
-    char* line_break;
-
-    while(line_init) {
-        line_break = strchr(line_init, '\n');
-        if (line_break) *line_break = '\0'; // igual ao buffer
-
-        char line_str[512];
-        strncpy(line_str, line_init, sizeof(line_str));
-        
-        char* name = strtok(line_str, ":");
-        strtok(NULL, ":");
-        char* uid_str = strtok(NULL, ":");
-
-        if (uid_str && atoi(uid_str) == uid) {
-            strcpy(username_out, name);
-            return;
-        }
-
-        if (line_break) line_init = line_break + 1;
-        else break;
+    struct passwd* pwd = getpwuid(geteuid());
+    if (pwd) {
+        strcpy(username_out, pwd->pw_name);
+    } else {
+        strcpy(username_out, "");
     }
 }
 
@@ -158,12 +99,8 @@ char* readCommandLine() {
     gethostname(hostname, sizeof(hostname)); // syscall gethostname(2)
     pwd(working_dir, sizeof(working_dir));
 
-    char* curr_dir = strrchr(working_dir, '/');
-    if(*(curr_dir + 1) == '\0')
-        strcpy(curr_dir, "/"); // Estamos no root
-
-    char prompt[1024];
-    snprintf(prompt, sizeof(prompt), "[%s@%s:%s]$ ", username, hostname, curr_dir);
+    char prompt[USER_MAX_SIZE * 2 + PATH_MAX_SIZE + 10];
+    snprintf(prompt, sizeof(prompt), "[%s@%s:%s]$ ", username, hostname, working_dir);
 
     char* input = readline(prompt); 
 
